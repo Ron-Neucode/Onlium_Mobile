@@ -21,7 +21,8 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardScreenState extends State<DashboardScreen>
+    with WidgetsBindingObserver {
   int _currentIndex = 0;
   Timer? _refreshTimer;
 
@@ -33,33 +34,77 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<Map<String, dynamic>> _applications = [];
   List<Map<String, dynamic>> _bulletins = [];
 
-  final List<Widget> _pages = [];
-
   @override
   void initState() {
     super.initState();
 
-    _pages.addAll([
-      _HomeTab(parentState: this),
-      const EnrollmentScreen(),
-      const StudyLoadScreen(),
-      const ResourceScreen(),
-      const AppointmentScreen(),
-    ]);
+    WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadDashboardSummary();
     });
 
-    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _loadDashboardSummary(showLoading: false);
+    // Auto-refresh every 8 seconds while the user is on Home.
+    _refreshTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      if (!mounted) return;
+
+      if (_currentIndex == 0 && !_isLoadingSummary) {
+        _loadDashboardSummary(showLoading: false);
+      }
     });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _refreshTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.resumed && _currentIndex == 0) {
+      _loadDashboardSummary(showLoading: false);
+    }
+  }
+
+  Future<String?> _waitForToken() async {
+    for (int i = 0; i < 15; i++) {
+      if (!mounted) return null;
+
+      final token = context.read<AuthProvider>().token;
+
+      if (token != null && token.isNotEmpty) {
+        return token;
+      }
+
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+
+    return null;
+  }
+
+  Future<http.Response?> _safeGet(
+    String url,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final response = await http
+          .get(Uri.parse(url), headers: headers)
+          .timeout(const Duration(seconds: 8));
+
+      debugPrint('Dashboard GET: $url');
+      debugPrint('Dashboard status: ${response.statusCode}');
+      debugPrint('Dashboard body: ${response.body}');
+
+      return response;
+    } catch (e) {
+      debugPrint('Dashboard request failed: $url');
+      debugPrint('Dashboard error: $e');
+      return null;
+    }
   }
 
   Future<void> _loadDashboardSummary({bool showLoading = true}) async {
@@ -73,14 +118,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     try {
-      final authProvider = context.read<AuthProvider>();
-      final token = authProvider.token;
+      final token = await _waitForToken();
 
       if (token == null || token.isEmpty) {
         if (!mounted) return;
 
         setState(() {
-          _summaryError = 'You are not logged in.';
+          _summaryError = 'Your session is still loading. Please refresh.';
           _isLoadingSummary = false;
         });
         return;
@@ -91,29 +135,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'Authorization': 'Bearer $token',
       };
 
-      final responses = await Future.wait([
-        http.get(
-          Uri.parse('${ApiConfig.baseUrl}/api/Notifications/mine'),
-          headers: headers,
-        ),
-        http.get(
-          Uri.parse('${ApiConfig.baseUrl}/api/Appointments/mine'),
-          headers: headers,
-        ),
-        http.get(
-          Uri.parse('${ApiConfig.baseUrl}/api/Applications/mine'),
-          headers: headers,
-        ),
-        http.get(
-          Uri.parse('${ApiConfig.baseUrl}/api/Bulletins'),
-          headers: headers,
-        ),
-      ]);
+      final notificationsResponse = await _safeGet(
+        '${ApiConfig.baseUrl}/api/Notifications/mine',
+        headers,
+      );
 
-      final notificationsResponse = responses[0];
-      final appointmentsResponse = responses[1];
-      final applicationsResponse = responses[2];
-      final bulletinsResponse = responses[3];
+      final appointmentsResponse = await _safeGet(
+        '${ApiConfig.baseUrl}/api/Appointments/mine',
+        headers,
+      );
+
+      final applicationsResponse = await _safeGet(
+        '${ApiConfig.baseUrl}/api/Applications/mine',
+        headers,
+      );
+
+      final bulletinsResponse = await _safeGet(
+        '${ApiConfig.baseUrl}/api/Bulletins',
+        headers,
+      );
 
       List<Map<String, dynamic>> notifications = [];
       List<Map<String, dynamic>> appointments = [];
@@ -121,28 +161,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
       List<Map<String, dynamic>> bulletins = [];
       final errors = <String>[];
 
-      if (notificationsResponse.statusCode == 200) {
-        notifications = _decodeList(notificationsResponse.body);
-      } else if (notificationsResponse.statusCode != 401) {
-        errors.add('Notifications failed: ${notificationsResponse.statusCode}');
+      if (notificationsResponse?.statusCode == 200) {
+        notifications = _decodeList(notificationsResponse!.body);
+      } else {
+        errors.add('Notifications unavailable');
       }
 
-      if (appointmentsResponse.statusCode == 200) {
-        appointments = _decodeList(appointmentsResponse.body);
-      } else if (appointmentsResponse.statusCode != 401) {
-        errors.add('Appointments failed: ${appointmentsResponse.statusCode}');
+      if (appointmentsResponse?.statusCode == 200) {
+        appointments = _decodeList(appointmentsResponse!.body);
+      } else {
+        errors.add('Appointments unavailable');
       }
 
-      if (applicationsResponse.statusCode == 200) {
-        applications = _decodeList(applicationsResponse.body);
-      } else if (applicationsResponse.statusCode != 401) {
-        errors.add('Applications failed: ${applicationsResponse.statusCode}');
+      if (applicationsResponse?.statusCode == 200) {
+        applications = _decodeList(applicationsResponse!.body);
+      } else {
+        errors.add('Applications unavailable');
       }
 
-      if (bulletinsResponse.statusCode == 200) {
-        bulletins = _decodeList(bulletinsResponse.body);
-      } else if (bulletinsResponse.statusCode != 401) {
-        errors.add('Bulletins failed: ${bulletinsResponse.statusCode}');
+      if (bulletinsResponse?.statusCode == 200) {
+        bulletins = _decodeList(bulletinsResponse!.body);
+      } else {
+        errors.add('Bulletins unavailable');
       }
 
       _sortByNewest(notifications, 'createdAt');
@@ -157,7 +197,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _appointments = appointments;
         _applications = applications;
         _bulletins = bulletins;
-        _summaryError = errors.isEmpty ? null : errors.join(' • ');
+        _summaryError = errors.length == 4 ? errors.join(' • ') : null;
         _isLoadingSummary = false;
       });
     } catch (e) {
@@ -171,13 +211,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   List<Map<String, dynamic>> _decodeList(String body) {
-    final decoded = jsonDecode(body);
+    try {
+      final decoded = jsonDecode(body);
 
-    if (decoded is! List) {
+      if (decoded is! List) {
+        return [];
+      }
+
+      return decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    } catch (e) {
+      debugPrint('Dashboard decode error: $e');
       return [];
     }
-
-    return decoded.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   }
 
   void _sortByNewest(List<Map<String, dynamic>> items, String dateKey) {
@@ -235,25 +280,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool get _hasCompletedApplication {
     final status = _latestApplicationStatus.toLowerCase();
 
-    return status == 'completed' || status == 'enrolled';
+    return status == 'approved' ||
+        status == 'completed' ||
+        status == 'enrolled';
   }
 
   bool get _isEnrolled => _hasCompletedAppointment || _hasCompletedApplication;
 
   String get _studentStatusText {
-    if (_isEnrolled) return 'Enrolled';
+    if (_isLoadingSummary) return 'Checking...';
 
     final appStatus = _latestApplicationStatus.toLowerCase();
     final appointmentStatus = _latestAppointmentStatus.toLowerCase();
 
+    if (_isEnrolled) return 'Enrolled';
+
     if (appointmentStatus == 'scheduled') return 'For Appointment';
+
     if (appointmentStatus == 'paymentconfirmed' ||
         appointmentStatus == 'payment confirmed') {
       return 'Payment Confirmed';
     }
 
-    if (appStatus == 'approved') return 'Approved';
-    if (appStatus == 'pendingreview') return 'Pending Review';
+    if (appStatus == 'pendingreview' || appStatus == 'pending review') {
+      return 'Pending Review';
+    }
+
     if (appStatus == 'rejected') return 'Rejected';
     if (appStatus == 'draft') return 'Draft';
 
@@ -261,25 +313,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   String get _enrollmentProgressText {
-    final appStatus = _latestApplicationStatus;
-    final appointmentStatus = _latestAppointmentStatus;
+    if (_isLoadingSummary) return 'Loading enrollment status...';
 
-    if (_hasCompletedAppointment || _hasCompletedApplication) {
+    final appStatus = _latestApplicationStatus.toLowerCase();
+    final appointmentStatus = _latestAppointmentStatus.toLowerCase();
+
+    if (appointmentStatus == 'completed' ||
+        appStatus == 'approved' ||
+        appStatus == 'completed' ||
+        appStatus == 'enrolled') {
       return 'Enrollment Completed';
     }
 
-    if (appointmentStatus.isNotEmpty) {
-      return _friendlyAppointmentStatus(appointmentStatus);
+    if (appointmentStatus == 'scheduled') {
+      return 'Appointment Scheduled';
     }
 
-    if (appStatus.isNotEmpty) {
-      return _friendlyApplicationStatus(appStatus);
+    if (appointmentStatus == 'paymentconfirmed' ||
+        appointmentStatus == 'payment confirmed') {
+      return 'Payment Confirmed';
+    }
+
+    if (_latestApplicationStatus.isNotEmpty) {
+      return _friendlyApplicationStatus(_latestApplicationStatus);
     }
 
     return 'No Enrollment Yet';
   }
 
   Color get _studentStatusColor {
+    if (_isLoadingSummary) return Colors.blueGrey;
+
     final status = _studentStatusText.toLowerCase();
 
     if (status == 'enrolled' ||
@@ -398,6 +462,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       case 'lms':
       case 'resource':
         return Icons.link;
+      case 'studyload':
+      case 'study load':
+        return Icons.fact_check;
       default:
         return Icons.notifications;
     }
@@ -420,6 +487,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       case 'lms':
       case 'resource':
         return Colors.purple;
+      case 'studyload':
+      case 'study load':
+        return Colors.teal;
       default:
         return Colors.grey;
     }
@@ -427,6 +497,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   List<_RecentActivityItem> _buildRecentActivities() {
     final items = <_RecentActivityItem>[];
+
+    if (_isLoadingSummary) {
+      return const [
+        _RecentActivityItem(
+          title: 'Checking enrollment status',
+          subtitle:
+              'Loading your latest enrollment, appointment, and notification data.',
+          trailingText: 'Please wait',
+          icon: Icons.sync,
+          iconColor: Colors.blueGrey,
+        ),
+      ];
+    }
 
     if (_latestApplication != null) {
       final status = _latestApplication!['status']?.toString() ?? '';
@@ -447,6 +530,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     if (_latestAppointment != null) {
       final status = _latestAppointment!['status']?.toString() ?? 'Scheduled';
+      final normalizedStatus = status.toLowerCase();
 
       items.add(
         _RecentActivityItem(
@@ -456,9 +540,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           trailingText:
               _latestAppointment!['location']?.toString() ?? 'School Campus',
           icon: Icons.event_available,
-          iconColor: status.toLowerCase() == 'completed'
+          iconColor: normalizedStatus == 'completed'
               ? Colors.green
-              : status.toLowerCase() == 'paymentconfirmed'
+              : normalizedStatus == 'paymentconfirmed' ||
+                    normalizedStatus == 'payment confirmed'
               ? Colors.blue
               : Colors.orange,
         ),
@@ -588,7 +673,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(index: _currentIndex, children: _pages),
+      body: IndexedStack(
+        index: _currentIndex,
+        children: [
+          _HomeTab(
+            key: ValueKey(
+              '${_isLoadingSummary}_${_latestAppointmentStatus}_${_latestApplicationStatus}_${_unreadNotificationCount}',
+            ),
+            parentState: this,
+          ),
+          const EnrollmentScreen(),
+          const StudyLoadScreen(),
+          const ResourceScreen(),
+          const AppointmentScreen(),
+        ],
+      ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: Colors.white,
@@ -607,7 +706,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
               setState(() => _currentIndex = index);
 
               if (index == 0) {
-                _loadDashboardSummary();
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  _loadDashboardSummary(showLoading: false);
+                });
               }
             },
             type: BottomNavigationBarType.fixed,
@@ -795,21 +897,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: statusColor.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      child: Text(
-                        _studentStatusText,
-                        style: TextStyle(
-                          color: statusColor,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 12,
+                    Flexible(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        decoration: BoxDecoration(
+                          color: statusColor.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Text(
+                          _studentStatusText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
                     ),
@@ -869,10 +975,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Align(
             alignment: Alignment.centerRight,
             child: TextButton.icon(
-              onPressed: () {
-                Navigator.of(context).push(
+              onPressed: () async {
+                await Navigator.of(context).push(
                   MaterialPageRoute(builder: (_) => const NotificationScreen()),
                 );
+
+                if (!mounted) return;
+                _loadDashboardSummary(showLoading: false);
               },
               iconAlignment: IconAlignment.end,
               icon: const Icon(Icons.arrow_forward, color: Color(0xFFB36A19)),
@@ -1109,7 +1218,7 @@ class _NewBadge extends StatelessWidget {
 class _HomeTab extends StatefulWidget {
   final _DashboardScreenState parentState;
 
-  const _HomeTab({required this.parentState});
+  const _HomeTab({super.key, required this.parentState});
 
   @override
   State<_HomeTab> createState() => _HomeTabState();
